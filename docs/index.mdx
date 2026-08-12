@@ -4,7 +4,7 @@ description: "Your design system as an API. Connect AI to Figma for extraction, 
 ---
 
 <Note>
-**New in v1.38.0 — Ongoing Component Changelogs in Generated Docs:** `figma_generate_component_doc` now pulls a *real* changelog instead of only echoing hand-written entries. Opt in with `history: { figma: true, git: true }` and the generated doc gains a `## History` section combining **design history** — Figma version history diffed per version and scoped to that component, surfacing renames, added component properties, and token bindings — with **code history** from `git log` on the component's source files, auto-derived from `codeInfo`. Prefers labeled versions and falls back to Figma auto-saves when a file has none (most files don't). Off by default, so existing calls are byte-identical. Server-only release — **no plugin re-import needed**. [See what's new →](https://github.com/southleft/figma-console-mcp/blob/main/CHANGELOG.md#1380---2026-07-25)
+**New in v1.39.0 (patched v1.39.1) — Multi-File Execution:** Work across several Figma files at once. `figma_execute_across_files` runs one script against every (or a chosen subset of) connected file **concurrently** — for auditing a multi-file design system for the same problem, or applying one fix across a known set, instead of switching the active file and repeating yourself. Four files × 2s of work completes in ~3s, not ~8s. `figma_execute` also takes an optional `fileKey` to target a single file without moving the active file or releasing target lock. You must name `fileKeys` or pass `allFiles: true` — there's no fan-out-to-everything default, since this runs code in files you may be actively editing. From community PR [#107](https://github.com/southleft/figma-console-mcp/pull/107) by [@Wolfr](https://github.com/Wolfr). Also fixes a relay bug that silently dropped `resultAnalysis` and `fileContext` from every `figma_execute` response — **re-import `manifest.json`** for those two fields; everything else works without it.  **Patched in v1.39.1:** if the plugin kept telling you to re-import no matter how many times you did, that was an older server instance nagging a newer plugin — an unfixable banner, now silenced. [See what's new →](https://github.com/southleft/figma-console-mcp/blob/main/CHANGELOG.md#1391---2026-08-02)
 </Note>
 
 # Your Design System as an API
@@ -216,7 +216,7 @@ Real component data. Real token values. Real code that uses your actual design s
 
 <Columns cols={3}>
   <Card title="NPX Setup (Recommended)" icon="bolt" href="/setup#-npx-setup-recommended">
-    **Full capabilities — 113 tools**
+    **Full capabilities — 114 tools**
 
     All tools including real-time monitoring. Requires Node.js and a Figma token.
   </Card>
@@ -284,7 +284,7 @@ Real component data. Real token values. Real code that uses your actual design s
     Real scenarios and workflows
   </Card>
   <Card title="All Tools" icon="wrench" href="/tools">
-    Complete reference for 113 tools
+    Complete reference for 114 tools
   </Card>
   <Card title="Troubleshooting" icon="circle-question" href="/troubleshooting">
     Common issues and solutions
