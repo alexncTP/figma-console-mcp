@@ -5,6 +5,44 @@ All notable changes to Figma Console MCP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.40.4] - 2026-09-21
+
+Found by live-testing v1.40.3 against hard production components (a 2-variant side navigation with 62 hidden layers, gradients, shadows and an 8-level tree) rather than tidy examples. Server-only: **no plugin re-import needed**.
+
+### Fixed
+
+- **Bridge reads went to the ACTIVE file, not the file named in `fileUrl`.** `figma_generate_component_doc` fetched variable names, the description and annotations from whichever file was active in Figma. Documenting a component in file A while file B was active printed `—` for every color token and raw `VariableID:118:874` for spacing — and because node and variable ids are only unique *within* a file, an id collision would silently return file B's names, description or annotations instead. The same flaw affected **`figma_get_component`** (which asks the plugin *before* REST, so it could return a different component that happened to share the node id) and **`figma_get_component_for_development`** (description and annotations). All now target the file in the URL; if that file isn't connected to the bridge they fall back to REST / hex values rather than to another file's data. Same root cause as the v1.40.2 export fix.
+- **A tool result over 16 MB disconnected the server for the rest of the session.** Claude Code closes the transport when one JSON-RPC message passes 16 MB (`wrote >16MB to stdout without a JSON-RPC message boundary`); the user saw only "Connection closed" and lost every tool. Reproduced twice with `figma_execute` returning large node JSON. Every tool result is now size-checked centrally (8 MB): an oversized result is replaced by an error that says how big it was, that any Figma changes still happened, and how to ask for less.
+- **Anatomy mislabeled every vertical auto-layout.** `primaryAxisSizingMode` was hard-wired to "width" and the counter axis to "height", which is only true for horizontal layouts — a fixed-width sidebar printed as `[fixed-height]`. Labels now follow the layout's real axes.
+- **v1.40.3's "show every icon" produced an unreadable cell** on a component with 23 icons. Repeats are now grouped and counted (`CaretDown ×3 _(2 hidden)_`), capped at five kinds. Icons are also named by the glyph actually in the slot: many systems wrap it (`Icon (small)` holding a swappable `MagnifyingGlass`), and the wrapper's name says nothing about which icon it is.
+- **v1.40.3's typography table listed one element several times with conflicting scopes** (`text-8 … all variants` *and* `… open=true`). Rows were identified by position in the tree, so ten nav items' badges became ten elements. A row is now identified by (element name, style) and appears once, with one scope.
+- **Anatomy repeated identical siblings in full** — ten near-identical nav items ran to ~150 lines. Runs of siblings that print identically collapse to one entry marked `×N`; a sibling that differs in anything the tree shows stays separate.
+- Shadow offsets/blur from scaled instances printed as `y 0.39000001549720764` (now rounded, hex uppercased), and an empty `## Overview` heading was left behind when a component has no description.
+
+## [1.40.3] - 2026-09-21
+
+Fidelity fixes for `figma_generate_component_doc` on harder components — tabs, scrollable containers, anything with hidden layers, one-sided borders, or variants that differ structurally. Server-only: **no plugin re-import needed**. Reported by Robin Di Capua, who checks every generated claim against the file; several further instances of the same defect classes were found by sweeping the tool for them.
+
+### Fixed
+
+- **Hidden layers were documented as if they render.** The walk checked whether a *paint* was visible but never whether the *layer* was, so a hidden `Focus Ring` sharing the selected underline's color printed as a second, identical `Stroke` row. Hidden layers (including anything under a hidden parent) are still collected — a hidden focus ring is real design intent — but are now labeled `_(hidden layer)_`, never chosen as a variant's primary color in the Variant Matrix, and shown in the anatomy tree marked `(hidden)`. Stroke and text rows now go through the same de-duplication as fills, and stroke rows name their layer.
+- **Border width ignored `individualStrokeWeights`.** With a one-sided border (underlines, dividers, accent bars) the scalar `strokeWeight` is a leftover from before the per-side override and appears nowhere in the rendered component — the doc reported it anyway, e.g. `2px` for a tab whose underline is `4px`. Per-side weights now win (`4px bottom`), and border width is only reported where a stroke is actually painted (the REST API puts `strokeWeight: 1` on every node).
+- **Typography was read from the first variant only.** A tab that is SemiBold when selected and Regular otherwise was documented as always SemiBold. Typography is now compared across every variant, with an *Applies to* column (`Is Selected=True`) when styles differ; a label hidden in some variants is reported as such; a text layer that mixes styles is flagged rather than presented as uniformly its base style.
+- **Anatomy showed one variant's layer tree.** Variants that differ structurally (a scrollable variant that wraps its list in scroller frames and adds a fade) lost everything unique to them. The doc now emits one tree per *distinct* structure, headed by the property that decides it.
+- **Trees were silently cut off.** The component was fetched at REST `depth: 4`, counted from the set — leaving each variant three levels, enough to drop nested labels and an entire scroll mechanism. The fetch is now 8 levels (falling back to 4, with a timeout, if a very large set makes the deep fetch fail), the walkers match it, and because REST returns a cut-off container as `children: []` — indistinguishable from an empty frame — the doc says so when layers sit at the limit instead of presenting an incomplete document as complete.
+- **Gradient, image and other non-solid fills were dropped without a trace**, as were **shadows, blurs and layer opacity**. They are now reported (`linear gradient (2 stops: #FFFFFF00 → #FFFFFF)`, `drop shadow: x 0 · y 2 · blur 4 …`, `opacity 40%` with its bound token). Silence read as "there is nothing there".
+- **A single boolean-valued variant property lost its name.** `Is scrollable=False` rendered as a variant called "False". Boolean-like values now keep their property (`Is scrollable=False`, `Hover / Is Selected=True`); ordinary values are unchanged (`Secondary / Critical`).
+- **Sets with only `VARIANT` properties got no Configurable Properties table** — the guard omitted `variants` even though the table renders them — and **`SLOT` properties were never listed at all**, which for a compositional component is the whole API.
+- **Only the first icon in a variant was shown.** A chip with leading and trailing icons lost the second from both the Variant Matrix and Icon Mapping.
+- **Design-Code Parity compared a property *name* as if it were a variant.** With no property literally named `Variant`, a `Size × State` set produced `| Size | Yes | **No** | Figma-only — needs code variant |`. Parity now compares each Figma property with the code prop of the same name, value by value, and makes no claim about properties that have no counterpart.
+- **Zero padding was omitted rather than shown as `0`** on auto-layout components, so a reader couldn't tell zero from unreported.
+- **Frontmatter asserted `status: stable` and `version: 1.0.0` for every component, and empty descriptions became `The <name> component.`** These read as extracted facts. Each is now emitted only when actually known.
+- **Identically named variables in different collections were ambiguous** (`Primitive/2x` in both Spacing and Radius). Those — and only those — are now qualified with their collection; every other token keeps the name already mapped to code.
+
+### Changed
+
+- **Generated markdown will differ** for existing components: hidden layers appear (marked) in color tables and anatomy, stroke rows read `Stroke (<layer>)`, border-width rows disappear for unstroked components, typography tables may gain an *Applies to* column, effects/opacity rows appear, and unknown frontmatter keys are omitted. If you diff or snapshot generated docs, expect a one-time change.
+
 ## [1.40.2] - 2026-09-18
 
 Data-loss fix for `figma_export_tokens`. **If you export into token files you care about, upgrade.** Server-only: no plugin re-import needed.
@@ -1361,6 +1399,8 @@ Connection health protocol — agents no longer need custom health-check logic t
 - Real-time Figma Desktop Bridge plugin
 - Support for both local (stdio) and Cloudflare Workers deployment
 
+[1.40.4]: https://github.com/southleft/figma-console-mcp/compare/v1.40.3...v1.40.4
+[1.40.3]: https://github.com/southleft/figma-console-mcp/compare/v1.40.2...v1.40.3
 [1.40.2]: https://github.com/southleft/figma-console-mcp/compare/v1.40.1...v1.40.2
 [1.40.1]: https://github.com/southleft/figma-console-mcp/compare/v1.40.0...v1.40.1
 [1.40.0]: https://github.com/southleft/figma-console-mcp/compare/v1.39.1...v1.40.0
