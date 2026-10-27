@@ -9,7 +9,7 @@
 // detect stale cached plugins. Bumped by scripts/release.sh ONLY when plugin files
 // change (see issue #62); server-only releases leave it alone, so it may lag
 // package.json — that's intentional, not drift.
-var PLUGIN_VERSION = '1.39.0'; // Last release in which plugin files changed.
+var PLUGIN_VERSION = '1.41.4'; // Last release in which plugin files changed.
 
 console.log('🌉 [Desktop Bridge] Plugin loaded (v' + PLUGIN_VERSION + ')');
 
@@ -1165,7 +1165,7 @@ figma.ui.onmessage = async (msg) => {
       }
 
       // Extract visual signature from a variant for diffing
-      function extractSignature(variant) {
+      async function extractSignature(variant) {
         var sig = {};
 
         // Find the main interactive element — prioritize by: has strokes (input fields),
@@ -1196,6 +1196,19 @@ figma.ui.onmessage = async (msg) => {
           }
         }
 
+        // No stroked/frame child: the variant itself carries the visuals
+        // (e.g. a button whose fill sits on the component).
+        if (!mainChild) mainChild = variant;
+        // Layer paths whose values the top-level fields already report.
+        sig._mainPath = mainChild === variant ? null : mainChild.name;
+        sig._textPath = null;
+
+        // Geometry and structure, so variants that differ in size or content
+        // (2 icons vs 6 icons) don't diff as identical (#121).
+        sig.width = Math.round(variant.width * 100) / 100;
+        sig.height = Math.round(variant.height * 100) / 100;
+        sig.children = variant.children ? variant.children.map(function(c) { return c.name; }) : [];
+
         if (mainChild) {
               var child = mainChild;
               // This is the main interactive frame
@@ -1215,7 +1228,7 @@ figma.ui.onmessage = async (msg) => {
                   sig.strokeHex = '#' + Math.round(sc.r*255).toString(16).padStart(2,'0') + Math.round(sc.g*255).toString(16).padStart(2,'0') + Math.round(sc.b*255).toString(16).padStart(2,'0');
                 }
                 sig.effects = child.effects && child.effects.length > 0 ? child.effects : null;
-                sig.opacity = child.opacity < 1 ? child.opacity : null;
+                sig.opacity = child.opacity < 1 ? Math.round(child.opacity * 100) / 100 : null;
               } catch(e) {}
 
               // Check text children for color changes
@@ -1223,6 +1236,7 @@ figma.ui.onmessage = async (msg) => {
                 for (var t = 0; t < child.children.length; t++) {
                   var textChild = child.children[t];
                   if (textChild.type === 'TEXT') {
+                    sig._textPath = sig._mainPath ? sig._mainPath + ' › ' + textChild.name : textChild.name;
                     try {
                       var tbv = textChild.boundVariables || {};
                       sig.textToken = resolveBoundColor(tbv.fills);
@@ -1237,18 +1251,107 @@ figma.ui.onmessage = async (msg) => {
               }
         }
 
-        // Check element visibility changes
+        // Top-level layers that are hidden. _visible keeps every child's
+        // visibility so the diff can compare both directions.
         sig.visibilityChanges = {};
+        sig._visible = {};
         if (variant.children) {
           for (var j = 0; j < variant.children.length; j++) {
             var ch = variant.children[j];
             try {
+              sig._visible[ch.name] = ch.visible !== false;
               if (!ch.visible) sig.visibilityChanges[ch.name] = false;
             } catch(e) {}
           }
         }
 
+        // Opacity on the variant itself (a disabled state often lives here,
+        // not on any child).
+        sig.variantOpacity = variant.opacity < 1 ? Math.round(variant.opacity * 100) / 100 : null;
+
+        // Fill and stroke on the variant itself. A button's background usually
+        // sits here while the main layer picked above is its label frame, so
+        // without these a hover that only changes the background diffs as
+        // no change.
+        sig.variantFill = null;
+        sig.variantStroke = null;
+        try {
+          var vbv = variant.boundVariables || {};
+          sig.variantFill = resolveBoundColor(vbv.fills) || (variant.fills && variant.fills.length > 0 && variant.fills[0].color ? colorHex(variant.fills[0].color) : null);
+          sig.variantStroke = resolveBoundColor(vbv.strokes) || (variant.strokes && variant.strokes.length > 0 && variant.strokes[0].color ? colorHex(variant.strokes[0].color) : null);
+        } catch(e) {}
+
+        // Nested layers, keyed by path. State changes often sit below the
+        // first child (a checked radio swaps the icon instance; its vector's
+        // fill token changes), which the fields above never see. Only used
+        // for diffing — stripped from the response.
+        // Auto-layout on the variant itself, so axes like Alignment or Density
+        // that only change layout don't diff as identical. Diff-only.
+        sig._layout = null;
+        try {
+          if (variant.layoutMode && variant.layoutMode !== 'NONE') {
+            sig._layout = {
+              layoutMode: variant.layoutMode,
+              primaryAxisAlignItems: variant.primaryAxisAlignItems,
+              counterAxisAlignItems: variant.counterAxisAlignItems,
+              itemSpacing: variant.itemSpacing,
+              paddingTop: variant.paddingTop,
+              paddingRight: variant.paddingRight,
+              paddingBottom: variant.paddingBottom,
+              paddingLeft: variant.paddingLeft
+            };
+          }
+        } catch(e) {}
+
+        sig._layers = {};
+        var layerCount = 0;
+        async function walkLayers(parent, prefix, depth) {
+          if (!parent.children || depth > 4) return;
+          var seen = {};
+          for (var li = 0; li < parent.children.length && layerCount < 300; li++) {
+            var ln = parent.children[li];
+            var nm = ln.name;
+            seen[nm] = (seen[nm] || 0) + 1;
+            if (seen[nm] > 1) nm = nm + '#' + seen[nm];
+            var path = prefix ? prefix + ' › ' + nm : nm;
+            var entry = {};
+            layerCount++;
+            try {
+              var lbv = ln.boundVariables || {};
+              var ft = resolveBoundColor(lbv.fills);
+              var st = resolveBoundColor(lbv.strokes);
+              entry.fill = ft || (ln.fills && ln.fills.length > 0 && ln.fills[0].color ? colorHex(ln.fills[0].color) : null);
+              entry.stroke = st || (ln.strokes && ln.strokes.length > 0 && ln.strokes[0].color ? colorHex(ln.strokes[0].color) : null);
+              entry.strokeWeight = entry.stroke ? (typeof ln.strokeWeight === 'number' ? ln.strokeWeight : null) : null;
+              entry.opacity = ln.opacity < 1 ? Math.round(ln.opacity * 100) / 100 : null;
+              entry.visible = ln.visible !== false;
+            } catch(e) {}
+            if (ln.type === 'INSTANCE') {
+              try {
+                var mc = await ln.getMainComponentAsync();
+                entry.component = mc ? mc.name : null;
+              } catch(e) {}
+            }
+            sig._layers[path] = entry;
+            await walkLayers(ln, path, depth + 1);
+          }
+        }
+        await walkLayers(variant, '', 0);
+
         return sig;
+      }
+
+      function colorHex(c) {
+        return '#' + Math.round(c.r*255).toString(16).padStart(2,'0') + Math.round(c.g*255).toString(16).padStart(2,'0') + Math.round(c.b*255).toString(16).padStart(2,'0');
+      }
+
+      // Signature as returned to the caller, without the diff-only fields.
+      function publicSignature(sig) {
+        var out = {};
+        for (var k in sig) {
+          if (k.charAt(0) !== '_') out[k] = sig[k];
+        }
+        return out;
       }
 
       // Parse variant property definitions
@@ -1312,25 +1415,51 @@ figma.ui.onmessage = async (msg) => {
       var stateMachine = { states: {}, defaultState: null, cssMapping: {} };
       var defaultSig = null;
 
-      // Find the default variant (first size, default state)
-      for (var di = 0; di < variants.length; di++) {
-        var vName = variants[di].name;
-        if (vName.indexOf('state=default') !== -1 && (sizeAxis ? vName.indexOf(sizeAxis + '=') !== -1 : true)) {
-          // Pick the first default state variant
-          if (!defaultVariant || vName.indexOf('large') !== -1) {
-            defaultVariant = variants[di];
+      // Find the default variant (#121). Start from Figma's own default (the
+      // set's top-left variant). With a state axis, prefer the variant that
+      // matches it on every other axis but is in a resting state. Variant
+      // names are "Axis=Value, ..." in the author's casing, so compare values
+      // case-insensitively.
+      function parseAxes(name) {
+        var out = {};
+        var segs = name.split(',');
+        for (var si = 0; si < segs.length; si++) {
+          var kv = segs[si].split('=');
+          if (kv.length === 2) out[kv[0].trim()] = kv[1].trim();
+        }
+        return out;
+      }
+      var figmaDefault = null;
+      try { figmaDefault = node.defaultVariant || null; } catch (e) {}
+      if (!figmaDefault && variants.length > 0) figmaDefault = variants[0];
+      defaultVariant = figmaDefault;
+      if (stateAxis && figmaDefault) {
+        var restingStates = ['default', 'rest', 'resting', 'enabled', 'idle', 'normal', 'base'];
+        var baseAxes = parseAxes(figmaDefault.name);
+        var currentState = (baseAxes[stateAxis] || '').toLowerCase();
+        if (restingStates.indexOf(currentState) === -1) {
+          for (var di = 0; di < variants.length; di++) {
+            var cand = parseAxes(variants[di].name);
+            var sameOtherAxes = true;
+            for (var bk in baseAxes) {
+              if (bk !== stateAxis && cand[bk] !== baseAxes[bk]) { sameOtherAxes = false; break; }
+            }
+            if (sameOtherAxes && restingStates.indexOf((cand[stateAxis] || '').toLowerCase()) !== -1) {
+              defaultVariant = variants[di];
+              break;
+            }
           }
         }
       }
       if (defaultVariant) {
-        defaultSig = extractSignature(defaultVariant);
+        defaultSig = await extractSignature(defaultVariant);
       }
 
       // Process each variant and compute diff from default
       var variantDiffs = [];
       for (var vdi = 0; vdi < variants.length; vdi++) {
         var variant = variants[vdi];
-        var sig = extractSignature(variant);
+        var sig = await extractSignature(variant);
 
         // Parse variant name to extract axis values
         var axisParts = variant.name.split(', ');
@@ -1352,15 +1481,83 @@ figma.ui.onmessage = async (msg) => {
           if (sig.textToken !== defaultSig.textToken) diff.textToken = sig.textToken || sig.textHex;
           if (sig.opacity !== defaultSig.opacity) diff.opacity = sig.opacity;
           if (JSON.stringify(sig.effects) !== JSON.stringify(defaultSig.effects)) diff.effects = sig.effects;
-          // Visibility changes not in default
-          var dvKeys = Object.keys(defaultSig.visibilityChanges);
-          var svKeys = Object.keys(sig.visibilityChanges);
-          for (var sk = 0; sk < svKeys.length; sk++) {
-            if (!defaultSig.visibilityChanges[svKeys[sk]]) {
+          if (sig.width !== defaultSig.width) diff.width = sig.width;
+          if (sig.height !== defaultSig.height) diff.height = sig.height;
+          if (sig.fillHex !== defaultSig.fillHex && !diff.fillToken) diff.fillHex = sig.fillHex;
+          if (sig.strokeHex !== defaultSig.strokeHex && !diff.strokeToken) diff.strokeHex = sig.strokeHex;
+          if (sig.textHex !== defaultSig.textHex && !diff.textToken) diff.textHex = sig.textHex;
+          if (JSON.stringify(sig.children) !== JSON.stringify(defaultSig.children)) {
+            diff.children = {
+              count: sig.children.length,
+              added: sig.children.filter(function(n) { return defaultSig.children.indexOf(n) === -1; }),
+              removed: defaultSig.children.filter(function(n) { return sig.children.indexOf(n) === -1; })
+            };
+          }
+          // Top-level layers present in both whose visibility differs
+          // (false = hidden in this variant, true = shown here but hidden in
+          // the default).
+          for (var vk in sig._visible) {
+            if (Object.prototype.hasOwnProperty.call(defaultSig._visible, vk) && sig._visible[vk] !== defaultSig._visible[vk]) {
               if (!diff.visibilityChanges) diff.visibilityChanges = {};
-              diff.visibilityChanges[svKeys[sk]] = sig.visibilityChanges[svKeys[sk]];
+              diff.visibilityChanges[vk] = sig._visible[vk];
             }
           }
+          if ((sig._mainPath || defaultSig._mainPath) && sig.variantOpacity !== defaultSig.variantOpacity) diff.variantOpacity = sig.variantOpacity === null ? 1 : sig.variantOpacity;
+          // When both use the variant as the main layer, fillToken/strokeToken
+          // above already report these.
+          if (sig._mainPath || defaultSig._mainPath) {
+            if (sig.variantFill !== defaultSig.variantFill) diff.variantFill = sig.variantFill;
+            if (sig.variantStroke !== defaultSig.variantStroke) diff.variantStroke = sig.variantStroke;
+          }
+
+          // Nested layer changes, skipping values the fields above already
+          // report so one change isn't listed twice.
+          if (sig._layout || defaultSig._layout) {
+            var la = sig._layout || {};
+            var lb = defaultSig._layout || {};
+            var layoutDiff = null;
+            var layoutKeys = ['layoutMode', 'primaryAxisAlignItems', 'counterAxisAlignItems', 'itemSpacing', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'];
+            for (var lk = 0; lk < layoutKeys.length; lk++) {
+              if (la[layoutKeys[lk]] !== lb[layoutKeys[lk]]) {
+                if (!layoutDiff) layoutDiff = {};
+                layoutDiff[layoutKeys[lk]] = la[layoutKeys[lk]] === undefined ? null : la[layoutKeys[lk]];
+              }
+            }
+            if (layoutDiff) diff.layout = layoutDiff;
+          }
+
+          var layerProps = ['fill', 'stroke', 'strokeWeight', 'opacity', 'visible', 'component'];
+          for (var lp in sig._layers) {
+            var dl = defaultSig._layers[lp];
+            if (!dl) continue;
+            var sl = sig._layers[lp];
+            var isTop = lp.indexOf(' › ') === -1;
+            var ld = null;
+            for (var pi = 0; pi < layerProps.length; pi++) {
+              var prop = layerProps[pi];
+              if (prop === 'visible' && isTop) continue;
+              if (lp === sig._mainPath && prop !== 'visible' && prop !== 'component') continue;
+              if (lp === sig._textPath && prop === 'fill') continue;
+              if (sl[prop] !== dl[prop]) {
+                if (!ld) ld = {};
+                ld[prop] = sl[prop] === undefined ? null : sl[prop];
+              }
+            }
+            if (ld) {
+              if (!diff.layers) diff.layers = {};
+              diff.layers[lp] = ld;
+            }
+          }
+          var nestedAdded = [];
+          var nestedRemoved = [];
+          for (var ap2 in sig._layers) {
+            if (ap2.indexOf(' › ') !== -1 && !defaultSig._layers[ap2] && nestedAdded.length < 20) nestedAdded.push(ap2);
+          }
+          for (var rp2 in defaultSig._layers) {
+            if (rp2.indexOf(' › ') !== -1 && !sig._layers[rp2] && nestedRemoved.length < 20) nestedRemoved.push(rp2);
+          }
+          if (nestedAdded.length) diff.layersAdded = nestedAdded;
+          if (nestedRemoved.length) diff.layersRemoved = nestedRemoved;
         }
 
         variantDiffs.push({
@@ -1370,7 +1567,7 @@ figma.ui.onmessage = async (msg) => {
           state: stateValue,
           cssSelector: cssSelector,
           diffFromDefault: Object.keys(diff).length > 0 ? diff : null,
-          signature: sig
+          signature: publicSignature(sig)
         });
 
         // Build CSS mapping
@@ -1384,8 +1581,10 @@ figma.ui.onmessage = async (msg) => {
       }
 
       if (defaultVariant) {
-        stateMachine.defaultState = 'default';
-        stateMachine.defaultSignature = defaultSig;
+        var defaultAxes = parseAxes(defaultVariant.name);
+        stateMachine.defaultState = stateAxis ? (defaultAxes[stateAxis] || 'default') : 'default';
+        stateMachine.defaultVariant = { id: defaultVariant.id, name: defaultVariant.name };
+        stateMachine.defaultSignature = publicSignature(defaultSig);
       }
 
       var result = {
@@ -1428,7 +1627,9 @@ figma.ui.onmessage = async (msg) => {
   // ============================================================================
   else if (msg.type === 'DEEP_GET_COMPONENT') {
     try {
-      var maxDepth = msg.depth || 10;
+      var maxDepth = msg.depth;
+      if (maxDepth === undefined || maxDepth === null) maxDepth = 10;
+      if (maxDepth <= 0) maxDepth = Infinity; // 0 or negative = unlimited depth
       console.log('🌉 [Desktop Bridge] Deep component fetch: ' + msg.nodeId + ' (depth: ' + maxDepth + ')');
 
       var rootNode = await figma.getNodeByIdAsync(msg.nodeId);
@@ -1523,11 +1724,36 @@ figma.ui.onmessage = async (msg) => {
         } catch (e) {}
         if (n.opacity !== undefined && n.opacity < 1) props.opacity = n.opacity;
 
+        // Mixed corner radius -> per-corner radii (full info instead of dropping)
+        try {
+          if (n.cornerRadius === figma.mixed) {
+            props.cornerRadius = 'MIXED';
+            props.cornerRadiuses = {
+              topLeft: n.topLeftRadius,
+              topRight: n.topRightRadius,
+              bottomRight: n.bottomRightRadius,
+              bottomLeft: n.bottomLeftRadius
+            };
+          }
+        } catch (e) {}
+        // Mixed stroke weight -> per-side weights
+        try {
+          if (n.strokeWeight === figma.mixed) {
+            props.strokeWeight = 'MIXED';
+            props.strokeWeights = {
+              top: n.strokeTopWeight,
+              right: n.strokeRightWeight,
+              bottom: n.strokeBottomWeight,
+              left: n.strokeLeftWeight
+            };
+          }
+        } catch (e) {}
+
         // Typography
         if (n.type === 'TEXT') {
           try { props.characters = n.characters; } catch (e) {}
           try { if (n.fontSize !== figma.mixed) props.fontSize = n.fontSize; } catch (e) {}
-          try { if (n.fontName !== figma.mixed) props.fontFamily = n.fontName.family; props.fontStyle = n.fontName.style; } catch (e) {}
+          try { if (n.fontName !== figma.mixed) { props.fontFamily = n.fontName.family; props.fontStyle = n.fontName.style; } } catch (e) {}
           try { if (n.fontWeight !== figma.mixed) props.fontWeight = n.fontWeight; } catch (e) {}
           try { if (n.lineHeight !== figma.mixed) props.lineHeight = n.lineHeight; } catch (e) {}
           try { if (n.letterSpacing !== figma.mixed) props.letterSpacing = n.letterSpacing; } catch (e) {}
@@ -1537,6 +1763,31 @@ figma.ui.onmessage = async (msg) => {
           try { if (n.textTruncation && n.textTruncation !== 'DISABLED') props.textTruncation = n.textTruncation; } catch (e) {}
           try { if (n.textCase && n.textCase !== 'ORIGINAL') props.textCase = n.textCase; } catch (e) {}
           try { if (n.textDecoration && n.textDecoration !== 'NONE') props.textDecoration = n.textDecoration; } catch (e) {}
+
+          // Expand mixed per-character styles into full per-range segments (no info loss).
+          try {
+            var _typoFields = ['fontName','fontSize','fontWeight','textDecoration','textCase','lineHeight','letterSpacing','fills','textStyleId','fillStyleId'];
+            var _anyMixed = false;
+            for (var _ti = 0; _ti < _typoFields.length; _ti++) {
+              try { if (n[_typoFields[_ti]] === figma.mixed) { _anyMixed = true; break; } } catch (e2) {}
+            }
+            if (_anyMixed && typeof n.getStyledTextSegments === 'function') {
+              props.styledSegments = n.getStyledTextSegments(_typoFields).map(function (s) {
+                var o = { characters: s.characters, start: s.start, end: s.end };
+                try { if (s.fontName) { o.fontFamily = s.fontName.family; o.fontStyle = s.fontName.style; } } catch (e3) {}
+                if (s.fontSize !== undefined) o.fontSize = s.fontSize;
+                if (s.fontWeight !== undefined) o.fontWeight = s.fontWeight;
+                if (s.lineHeight !== undefined) o.lineHeight = s.lineHeight;
+                if (s.letterSpacing !== undefined) o.letterSpacing = s.letterSpacing;
+                if (s.textDecoration !== undefined) o.textDecoration = s.textDecoration;
+                if (s.textCase !== undefined) o.textCase = s.textCase;
+                if (s.fills !== undefined) o.fills = s.fills;
+                if (s.textStyleId) o.textStyleId = s.textStyleId;
+                if (s.fillStyleId) o.fillStyleId = s.fillStyleId;
+                return o;
+              });
+            }
+          } catch (e) {}
         }
 
         // Design tokens (resolved to names)
@@ -1662,16 +1913,22 @@ figma.ui.onmessage = async (msg) => {
 
       var result = walkNode(rootNode, 0);
       result._variableMapSize = Object.keys(varNameMap).length;
-      result._maxDepthUsed = maxDepth;
+      result._maxDepthUsed = (maxDepth === Infinity) ? 'unlimited' : maxDepth;
 
-      var resultJson = JSON.stringify(result);
+      // figma.mixed is a Symbol; it cannot cross figma.ui.postMessage
+      // (structuredClone throws "Cannot unwrap symbol"). Serialize with a
+      // replacer that turns any Symbol into the string "MIXED", then send the
+      // parsed (symbol-free) clone instead of the raw node tree.
+      var resultJson = JSON.stringify(result, function (key, val) {
+        return typeof val === 'symbol' ? 'MIXED' : val;
+      });
       console.log('🌉 [Desktop Bridge] Deep component data: ' + Math.round(resultJson.length / 1024) + 'KB, vars resolved: ' + Object.keys(varNameMap).length);
 
       figma.ui.postMessage({
         type: 'DEEP_GET_COMPONENT_RESULT',
         requestId: msg.requestId,
         success: true,
-        data: result
+        data: JSON.parse(resultJson)
       });
 
     } catch (error) {
@@ -1733,6 +1990,8 @@ figma.ui.onmessage = async (msg) => {
 
       // Helper to extract component set data with all variants
       function extractComponentSetData(node) {
+        // The getter recomputes on every access; read it once per set
+        var setPropDefs = node.componentPropertyDefinitions;
         var variantAxes = {};
         var variants = [];
 
@@ -1795,8 +2054,8 @@ figma.ui.onmessage = async (msg) => {
           variantAxes: axes,
           variants: variants,
           defaultVariant: variants.length > 0 ? variants[0] : null,
-          properties: node.componentPropertyDefinitions ? Object.keys(node.componentPropertyDefinitions).map(function(propName) {
-            var propDef = node.componentPropertyDefinitions[propName];
+          properties: setPropDefs ? Object.keys(setPropDefs).map(function(propName) {
+            var propDef = setPropDefs[propName];
             return {
               name: propName,
               type: propDef.type,
@@ -1807,60 +2066,30 @@ figma.ui.onmessage = async (msg) => {
         };
       }
 
-      // Recursively search for components
-      function findComponents(node) {
-        if (!node) return;
-
-        if (node.type === 'COMPONENT_SET') {
-          componentSets.push(extractComponentSetData(node));
-        } else if (node.type === 'COMPONENT') {
-          // Only add standalone components (not variants inside component sets)
-          if (!node.parent || node.parent.type !== 'COMPONENT_SET') {
-            components.push(extractComponentData(node, false));
-          }
-        }
-
-        // Recurse into children — skip unresolvable slot sublayers
-        if (node.children) {
-          node.children.forEach(function(child) {
-            try { findComponents(child); } catch (e) { /* slot sublayer — skip */ }
-          });
-        }
-      }
-
       // Load all pages first (required before accessing children)
       console.log('🌉 [Desktop Bridge] Loading all pages...');
       await figma.loadAllPagesAsync();
 
-      // Process pages in batches with event loop yields to prevent UI freeze
-      // This is critical for large design systems that could otherwise crash
-      var pages = figma.root.children;
-      var PAGE_BATCH_SIZE = 3;  // Process 3 pages at a time
-      var totalPages = pages.length;
-
-      console.log('🌉 [Desktop Bridge] Processing ' + totalPages + ' pages in batches of ' + PAGE_BATCH_SIZE + '...');
-
-      for (var pageIndex = 0; pageIndex < totalPages; pageIndex += PAGE_BATCH_SIZE) {
-        var batchEnd = Math.min(pageIndex + PAGE_BATCH_SIZE, totalPages);
-        var batchPages = [];
-        for (var j = pageIndex; j < batchEnd; j++) {
-          batchPages.push(pages[j]);
-        }
-
-        // Process this batch of pages
-        batchPages.forEach(function(page) {
-          findComponents(page);
-        });
-
-        // Log progress for large files
-        if (totalPages > PAGE_BATCH_SIZE) {
-          console.log('🌉 [Desktop Bridge] Processed pages ' + (pageIndex + 1) + '-' + batchEnd + ' of ' + totalPages + ' (found ' + components.length + ' components so far)');
-        }
-
-        // Yield to event loop between batches to prevent UI freeze and allow cancellation
-        if (batchEnd < totalPages) {
-          await new Promise(function(resolve) { setTimeout(resolve, 0); });
-        }
+      // Native search instead of a JS walk over every node (#120): the walk
+      // crossed into the Plugin API for each of the file's nodes, including
+      // every layer inside every instance (89k nodes: 1.7s vs 0.13s here, and
+      // far worse on heavier files).
+      var found = figma.root.findAllWithCriteria({ types: ['COMPONENT_SET', 'COMPONENT'] });
+      console.log('🌉 [Desktop Bridge] Found ' + found.length + ' component nodes; extracting...');
+      for (var fi = 0; fi < found.length; fi++) {
+        var fnode = found[fi];
+        try {
+          if (fnode.type === 'COMPONENT_SET') {
+            componentSets.push(extractComponentSetData(fnode));
+          } else if (!fnode.parent || fnode.parent.type !== 'COMPONENT_SET') {
+            // Standalone components only (variants are reported under their set)
+            components.push(extractComponentData(fnode, false));
+          }
+        } catch (e) { /* unresolvable slot sublayer — skip */ }
+        // No setTimeout yields here: plugin timers are throttled when Figma is
+        // in the background (up to ~1/min under Chromium's intensive
+        // throttling), so a handful of yields turned a ~1.5s extraction into
+        // the 300s timeout reported in #120.
       }
 
       console.log('🌉 [Desktop Bridge] Found ' + components.length + ' components and ' + componentSets.length + ' component sets');

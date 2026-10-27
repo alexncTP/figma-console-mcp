@@ -5,6 +5,96 @@ All notable changes to Figma Console MCP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.41.4] - 2026-10-26
+
+More component-set analysis fixes, found by running v1.41.3's shipped plugin against a real file. **Re-import the Desktop Bridge plugin** (Plugins → Development → Import plugin from manifest → `~/.figma-console-mcp/plugin/manifest.json`) to get them.
+
+### Fixed
+
+- **`figma_analyze_component_set` missed background changes on buttons.** A button's background usually sits on the variant itself, while the layer the analyzer treats as the main one is the label frame inside it. A hover that only changes the background came back as no change, and Primary vs Danger only reported the text color. Each variant's `diffFromDefault` now includes `variantFill` and `variantStroke` (e.g. `"variantFill": "semantic/color/background/primary/weak"`).
+- **Variants that differ only in auto-layout diffed as identical.** On a Button Group, `Alignment=Center` only changes the variant's alignment. It now reports `layout: { "primaryAxisAlignItems": "CENTER" }`. Direction, alignment, gap and padding are compared.
+
+On the test file, every variant in its 26 component sets now reports a difference, except four that really are identical to their default (checked property by property).
+
+
+## [1.41.3] - 2026-10-26
+
+Component-set analysis fixes found by live-testing v1.41.1 on four more design-system files. **Re-import the Desktop Bridge plugin** (Plugins → Development → Import plugin from manifest → `~/.figma-console-mcp/plugin/manifest.json`) to get them.
+
+### Fixed
+
+- **`figma_analyze_component_set` missed state changes below the first layer.** The diff read fill, stroke and text from one child layer, so a change anywhere deeper looked like no change. A radio button's checked and hover states swap the nested icon instance, whose vector changes fill token, and its disabled state sets opacity on the variant itself. All of these came back as `diffFromDefault: null`. Each variant's `diffFromDefault` now has a `layers` entry, keyed by layer path (`"Icons/Radio › Icon": { "fill": "color/content/weak-hover" }`, `"Icons/Radio": { "component": "state=hover" }`), plus `variantOpacity`, `layersAdded` and `layersRemoved`. On that file, 8 of 9 variants now report their differences, up from 4.
+- **A layer hidden in every variant was reported as a change on all of them.** On a 135-variant button set, every non-default variant listed `visibilityChanges: { "Icon": false }`, even though the default hides it too. Visibility is now compared in both directions, and only real differences are reported: `false` means hidden in this variant, `true` means shown here but hidden in the default.
+- Opacity values are rounded (`0.4`, not `0.4000000059604645`).
+
+
+## [1.41.2] - 2026-10-26
+
+Server-only: **no plugin re-import needed** beyond v1.41.1's.
+
+### Fixed
+
+- **`figma_get_design_system_summary` and `figma_get_token_values` reported 0 tokens on every file.** They read the variables response from the wrong field, so the token half of the design-system cache was always empty, even on a file with 15,206 variables. Those tokens now come through: 6,443 color and number tokens for that file. This was the `{}` from `figma_get_token_values` reported in #120.
+
+
+## [1.41.1] - 2026-10-26
+
+Fixes for component analysis, component loading on large files, and variable paging. **Re-import the Desktop Bridge plugin** (Plugins → Development → Import plugin from manifest → `~/.figma-console-mcp/plugin/manifest.json`) to get the component fixes. Everything else works without it.
+
+### Fixed
+
+- **`figma_analyze_component_set` reported no differences between variants.** The default variant was found by searching names for a lowercase `state=default`, so sets named with Figma's usual `State=Default`, or with no state axis at all, had no default and every `diffFromDefault` was null. It now starts from Figma's own default variant (preferring a resting state when there is a state axis) and reports it as `stateMachine.defaultVariant`. Diffs now include width, height and added/removed child layers, so a 44px variant and a 284px variant no longer read as identical. Plugin re-import required. Reported by @slava-lilg (#121).
+- **Loading a file's components could time out after 300 seconds** (`figma_search_components`, `figma_get_design_system_summary`, `figma_get_design_system_kit`) on files that load in about a second. The plugin paused between batches of pages with `setTimeout`, and plugin timers are heavily throttled while Figma is in the background, so a few pauses could take minutes. The pauses are gone, and components are found with Figma's native search instead of a walk over every layer. On a 3,000-component library: 16.6s → 1.5s, same results. Plugin re-import required. Reported by @slava-lilg (#120).
+- **`figma_get_design_system_summary` reported "0 components" when the component fetch failed.** It now returns `success: false` and leaves the component counts unknown (#120).
+- **`figma_search_components` ranked results in file order**, so a component whose description mentioned "button" could come before the Button component. Results are now ranked: exact name, then name prefix, then name contains, then description-only matches.
+- **`figma_get_variables` ignored `page`/`pageSize` with `format: "full"`.** It returned every variable with no `pagination` object. Passing either now pages the full dataset and reports `pagination`. Reported by @muloka (#98).
+- **The `pagination` object had different field names depending on where the data came from** (`page`/`totalItems` from the REST API). It's now always `currentPage`, `pageSize`, `totalVariables`, `totalPages`, `hasNextPage` and `hasPrevPage`. Freshly fetched filtered results were also missing `pagination` entirely. Reported by @muloka (#99).
+- **`figma_get_component_for_development_deep` crashed on text with mixed case or decoration** ("Cannot unwrap symbol"). Mixed values are now reported as `"MIXED"`, with per-range styles in `styledSegments`. From community PR #85 by @DarWiM. Plugin re-import required.
+
+### Changed
+
+- **`figma_get_component_for_development_deep` accepts `depth: 0` for unlimited depth** (the tool description already promised it; values above 20 were clamped). Unlimited requests get a 120s timeout. From community PR #86 by @DarWiM, extended to Cloud Mode.
+
+
+## [1.41.0] - 2026-10-26
+
+Security fixes for Cloud Mode sign-in, two data-loss fixes, and a sweep of the open issue tracker. Server-only: **no plugin re-import needed**. Cloud Mode users who connect through a client other than Claude.ai or a local app will see an "Authorize access" page when they sign in. Existing `/sse` connections need to reconnect once.
+
+### Security
+
+- **Cloud Mode `/sse` sessions could use another user's Figma token.** Every `/sse` session read its token from one storage slot shared by all users, so REST calls ran with whichever user (or personal access token) had connected most recently. Each session now uses the token its own client presented, and each session id is bound to that token: a request that names a session with different credentials is refused. The shared slot is gone. The `/mcp` endpoint was not affected. Reported in #104.
+- **Cloud Mode sign-in could hand an authorization code to an attacker.** `/authorize` sent the code to any `redirect_uri`, and the "code" was the client's public `client_id`, reusable for the life of the token. Now:
+  - Codes are random, single-use, expire after 10 minutes, and are bound to the client, its redirect URI and its PKCE challenge. PKCE (S256) is required.
+  - A registered client's redirect URI must match its registration; loopback redirects may use any port (RFC 8252).
+  - Any destination other than a loopback address or Claude's hosted callback shows a consent page naming where access will be sent. This includes clients whose registration has expired.
+  - The flow must finish in the browser that started it, so a sign-in link started by someone else can't deliver your code to them.
+  
+  Reported in #104.
+- **The OAuth error page reflected its query parameters as HTML** (`/oauth/callback?error=…`). They are now escaped. Reported in #104.
+- **`figma_scan_code_accessibility` executed scripts contained in the HTML it scanned.** JSDOM ran with `runScripts: "dangerously"`, and a `<script>` could reach the Node process. Scripts and inline handlers in scanned HTML no longer run; axe-core is loaded separately. Local Mode only. Reported in #104.
+- Two attribute values in the token browser app are now escaped.
+
+### Fixed
+
+- **`figma_import_tokens` could delete every variable in a file and report success.** With a `configPath` whose source folder held `tokens.json` (the default pattern is `*.tokens.json`), the import read no files, returned `success: true` with no warnings, and planned to delete all variables; `strategy: "replace"` would have carried that out. A source folder with no matching files is now an error that names the JSON files it found, and any import that parses no tokens is refused. Reported by @slava-lilg (#122).
+- **`strategy: "replace"` deletes only inside the collections the token files contain.** A file covering one collection used to make every other collection's variables delete candidates. They are now left alone, with a warning.
+- **`figma_arrange_component_set` deleted other arranged component sets.** Each run removed every "Component Container" on the page, and each container holds its component set, so arranging a second set deleted the first set and all its variants. Only the set's own previous arrangement is replaced now. Reported by @cforsyth77 (#53).
+- **`figma_export_tokens` and `figma_import_tokens` used a stale copy of the variables.** Both read the snapshot the plugin takes when it opens, so renames and `codeSyntax` changes made afterwards were missing from exports, and imports compared against old names. Both now read variables live. If the live read fails, export falls back to the snapshot and says so. Reported by @marcinkwiatkowski605 and @BoTsch50 (#91).
+- **On Windows, abandoned servers never exited**, holding one port each until all ten were taken. The server now exits when its client closes stdin. From community PR #140 by @RomanOdokienko (#116).
+- **`figma_get_console_logs` and `figma_watch_console` claimed to capture any plugin's logs.** They only see the Desktop Bridge's own sandbox, because Figma runs one plugin at a time, each isolated. The descriptions and docs now say so (#119).
+- **The README's "Recommended Connection" section pointed npx users at the npx cache.** It now gives the stable `~/.figma-console-mcp/plugin/manifest.json` path and `--print-path`. The README, `--print-path` and `figma_get_status` explain that the folder is hidden on macOS and how to open it in Figma's import dialog (⌘⇧G). Reported by @muloka (#100, #101).
+- The published `dist/local.js` is marked executable (#73).
+
+### Added
+
+- **`figma_batch_create_variables` and `figma_setup_design_tokens` accept aliases**: pass a `VariableID:…` value, as `figma_batch_update_variables` already allowed. Reported by @muloka (#52).
+- **`fileKey` targeting for the five Slots tools**, so they can act on a connected file without switching the active file. Rejected in Cloud Mode, which pairs with one file. From community PR #112 by @Wolfr.
+
+### Changed
+
+- Dependencies updated within their semver ranges (`npm audit fix`); production advisories dropped from 12 to 2. The remaining two (`@modelcontextprotocol/sdk` < 1.32, `zod` < 4.6.6) require a coordinated upgrade of the Cloudflare `agents` package, tracked separately.
+
+
 ## [1.40.9] - 2026-10-02
 
 Support for Figma's composed colors: a color variable set to another color at an opacity ("grey/900 at 50%"). Server-only: **no plugin re-import needed**.
@@ -1478,6 +1568,11 @@ Connection health protocol — agents no longer need custom health-check logic t
 - Real-time Figma Desktop Bridge plugin
 - Support for both local (stdio) and Cloudflare Workers deployment
 
+[1.41.4]: https://github.com/southleft/figma-console-mcp/compare/v1.41.3...v1.41.4
+[1.41.3]: https://github.com/southleft/figma-console-mcp/compare/v1.41.2...v1.41.3
+[1.41.2]: https://github.com/southleft/figma-console-mcp/compare/v1.41.1...v1.41.2
+[1.41.1]: https://github.com/southleft/figma-console-mcp/compare/v1.41.0...v1.41.1
+[1.41.0]: https://github.com/southleft/figma-console-mcp/compare/v1.40.9...v1.41.0
 [1.40.9]: https://github.com/southleft/figma-console-mcp/compare/v1.40.8...v1.40.9
 [1.40.8]: https://github.com/southleft/figma-console-mcp/compare/v1.40.7...v1.40.8
 [1.40.7]: https://github.com/southleft/figma-console-mcp/compare/v1.40.6...v1.40.7
