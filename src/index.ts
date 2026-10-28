@@ -28,6 +28,7 @@ import { registerDesignSystemTools } from "./core/design-system-tools.js";
 import { registerLibraryTools, registerLibraryVariableTools } from "./core/library-tools.js";
 import { registerDiagnoseTool } from "./core/diagnose-tool.js";
 import { wrapServerForIdentity } from "./core/identity.js";
+import { isFigmaPAT, validateFigmaPAT } from "./core/figma-pat.js";
 import { PluginRelayDO, generatePairingCode } from "./core/cloud-websocket-relay.js";
 import { CloudWebSocketConnector } from "./core/cloud-websocket-connector.js";
 import { registerWriteTools } from "./core/write-tools.js";
@@ -45,30 +46,19 @@ export { PluginRelayDO } from "./core/cloud-websocket-relay.js";
 const logger = createChildLogger({ component: "mcp-server" });
 
 /**
- * Validate a Figma Personal Access Token (PAT) by calling the Figma API.
- * PATs start with 'figd_' and require the X-Figma-Token header (not Bearer).
- * Returns the user info if valid, null if invalid/expired.
+ * Scopes requested at Cloud Mode sign-in, advertised in OAuth metadata and
+ * echoed in token responses. Each must also be enabled on the Figma OAuth
+ * app. library_assets:read covers lookups by component/style key.
  */
-async function validateFigmaPAT(token: string): Promise<{ id: string; handle: string; email: string } | null> {
-	try {
-		const response = await fetch("https://api.figma.com/v1/me", {
-			headers: { "X-Figma-Token": token },
-		});
-		if (!response.ok) return null;
-		const data = await response.json() as { id: string; handle: string; email: string };
-		return data?.id ? data : null;
-	} catch {
-		return null;
-	}
-}
-
-/**
- * Check if a token is a Figma Personal Access Token.
- * PATs start with 'figd_' — OAuth tokens start with 'figu_'.
- */
-function isFigmaPAT(token: string): boolean {
-	return token.startsWith("figd_");
-}
+const FIGMA_OAUTH_SCOPES = [
+	"file_content:read",
+	"file_versions:read",
+	"file_variables:read",
+	"file_comments:read",
+	"file_comments:write",
+	"library_content:read",
+	"library_assets:read",
+];
 
 /**
  * Serve the legacy /sse transport with the caller's already-verified Figma
@@ -113,13 +103,18 @@ async function serveSSEWithToken(request: Request, env: Env, ctx: ExecutionConte
  */
 // Server version reported by figma_diagnose in both cloud endpoints.
 // scripts/release.sh keeps this current (it rewrites every `version: "x.y.z"` here).
-const cloudBuild = { version: "1.41.4" };
+const cloudBuild = { version: "1.44.2" };
 
 export class FigmaConsoleMCPv3 extends McpAgent {
+	// agents 0.7 types `server` against its own nested SDK 1.26 copy; ours is
+	// 1.32 (security fixes). Only connect() and the transport interface cross
+	// that boundary, and both are unchanged between the two. Moving to agents
+	// 0.30+ removes the split but needs a newer workerd and compatibility_date.
+	// @ts-expect-error -- same McpServer class from two SDK copies
 	server = (() => {
 		const s = new McpServer({
 			name: "Figma Console MCP",
-			version: "1.41.4",
+			version: "1.44.2",
 		});
 		// Identity wrap — every tool's response and thrown error gets stamped
 		// with our MCP name so cross-MCP attribution is unambiguous.
@@ -1256,7 +1251,7 @@ export default {
 
 			const statelessServer = new McpServer({
 				name: "Figma Console MCP",
-				version: "1.41.4",
+				version: "1.44.2",
 			});
 			wrapServerForIdentity(statelessServer);
 
@@ -1447,7 +1442,7 @@ export default {
 			const metadata = {
 				resource: url.origin,
 				authorization_servers: [`${url.origin}/`],
-				scopes_supported: ["file_content:read", "file_versions:read", "file_variables:read", "file_comments:read", "file_comments:write", "library_content:read"],
+				scopes_supported: FIGMA_OAUTH_SCOPES,
 				bearer_methods_supported: ["header"],
 				resource_signing_alg_values_supported: ["RS256"]
 			};
@@ -1467,7 +1462,7 @@ export default {
 				authorization_endpoint: `${url.origin}/authorize`,
 				token_endpoint: `${url.origin}/token`,
 				registration_endpoint: `${url.origin}/oauth/register`,
-				scopes_supported: ["file_content:read", "file_versions:read", "file_variables:read", "file_comments:read", "file_comments:write", "library_content:read"],
+				scopes_supported: FIGMA_OAUTH_SCOPES,
 				response_types_supported: ["code"],
 				grant_types_supported: ["authorization_code", "refresh_token"],
 				token_endpoint_auth_methods_supported: ["client_secret_basic", "client_secret_post"],
@@ -1584,7 +1579,7 @@ export default {
 			const figmaAuthUrl = new URL("https://www.figma.com/oauth");
 			figmaAuthUrl.searchParams.set("client_id", env.FIGMA_OAUTH_CLIENT_ID);
 			figmaAuthUrl.searchParams.set("redirect_uri", `${oauthOrigin}/oauth/callback`);
-			figmaAuthUrl.searchParams.set("scope", "file_content:read,file_versions:read,file_variables:read,file_comments:read,file_comments:write,library_content:read");
+			figmaAuthUrl.searchParams.set("scope", FIGMA_OAUTH_SCOPES.join(","));
 			figmaAuthUrl.searchParams.set("state", stateToken);
 			figmaAuthUrl.searchParams.set("response_type", "code");
 
@@ -1722,7 +1717,7 @@ export default {
 						token_type: "Bearer",
 						expires_in: Math.max(0, Math.floor((tokenData.expiresAt - Date.now()) / 1000)),
 						refresh_token: tokenData.refreshToken,
-						scope: "file_content:read file_versions:read file_variables:read file_comments:read file_comments:write library_content:read"
+						scope: FIGMA_OAUTH_SCOPES.join(" ")
 					}), {
 						headers: {
 							"Content-Type": "application/json",
@@ -1793,7 +1788,7 @@ export default {
 					token_type: "Bearer",
 					expires_in: tokenData.expires_in,
 					refresh_token: tokenData.refresh_token || refreshToken,
-					scope: "file_content:read file_versions:read file_variables:read file_comments:read file_comments:write library_content:read"
+					scope: FIGMA_OAUTH_SCOPES.join(" ")
 				}), {
 					headers: {
 						"Content-Type": "application/json",
@@ -1884,7 +1879,7 @@ export default {
 			const figmaAuthUrl = new URL("https://www.figma.com/oauth");
 			figmaAuthUrl.searchParams.set("client_id", env.FIGMA_OAUTH_CLIENT_ID);
 			figmaAuthUrl.searchParams.set("redirect_uri", redirectUri);
-			figmaAuthUrl.searchParams.set("scope", "file_content:read,file_versions:read,file_variables:read,file_comments:read,file_comments:write,library_content:read");
+			figmaAuthUrl.searchParams.set("scope", FIGMA_OAUTH_SCOPES.join(","));
 			figmaAuthUrl.searchParams.set("state", stateToken);
 			figmaAuthUrl.searchParams.set("response_type", "code");
 
@@ -2214,7 +2209,7 @@ export default {
 				JSON.stringify({
 					status: "healthy",
 					service: "Figma Console MCP",
-					version: "1.41.4",
+					version: "1.44.2",
 					endpoints: {
 						mcp: ["/sse", "/mcp"],
 						oauth_mcp_spec: ["/.well-known/oauth-authorization-server", "/authorize", "/token", "/oauth/register"],
@@ -2259,7 +2254,7 @@ export default {
 	// Local count and the data-mode="cloud" Cloud count). Remote has no count:
 	// it is the same hosted endpoint before pairing, so it is described, not counted.
 	if (url.pathname === "/") {
-		const landing = { version: "1.41.4" };
+		const landing = { version: "1.44.2" };
 		return new Response(
 			`<!DOCTYPE html>
 <html lang="en">
